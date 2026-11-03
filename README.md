@@ -1,100 +1,52 @@
-<div align="center">
+# qmc-decoder（fork）
 
-# 🎵 QMC Decoder
+本仓库是 [ownlight6/qmc-decoder](https://github.com/ownlight6/qmc-decoder) 的 fork。
+**以下只列出与原版的差异**；功能介绍、使用方法、截图等其余内容见[原仓库](https://github.com/ownlight6/qmc-decoder)。
 
-**解密 QQ 音乐加密音频文件（QMC1/QMC2 格式）**
+## 与原版的差异
 
-Tauri 桌面应用 · 支持自动获取 ekey · 批量解密 · 支持 Windows / macOS
+### 1. 支持 STag 尾部（原版不支持）
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE) [![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+原版 `detect_footer` 不认识新版 QQ 音乐客户端写入的 34 字节 STag 尾部
+（仅含 `song_id` + `media_mid`，**不内嵌 ekey**），这类文件会报
+`Cannot auto-fetch ekey: file does not have a musicEx footer`。
 
-</div>
+- `src/lib.rs`：新增 `FooterInfo::Stag` 变体；`detect_footer` 识别 STag；`decrypt_file` 新增 STag 分支，按尾部 meta 中的 size 正确裁尾后再解密
+- `src-tauri/src/commands.rs`：文件信息展示补上 STag 分支（尾部类型、歌曲 ID、媒体 MID）
 
----
+### 2. STag 文件的 ekey 自动获取（原版拿不到）
 
-## 📸 截图
+STag 文件本身不含 songmid，无法直接调 GetEVkey。
 
-**macOS**
+- `src/ekey_fetch.rs`：新增 `parse_stag_footer` 与 `resolve_stag_via_local_library` —— 在本机 QQ 音乐 `iQmc` 目录里按 song_id / media_mid 找到同曲的 musicex 副本，换回 API 所需的 songmid 与 filename
+- 新增错误类型 `EkeyFetchError::StagUnresolved`（本机找不到副本时给出明确提示）
 
-![macOS 截图](imgs/mac.png)
+### 3. GetEVkey 前缀轮换 + 解密验证（原版固定单一 filename）
 
----
+同一 `media_mid` 下，GetEVkey 会因 filename 前缀（`O4M0`/`O8M0`/`F0M0` 等质量档）不同返回**不同 ekey**。
+原版固定用本地副本的前缀，若与待解文件码率档不一致就会解出乱码。
 
-## ✨ 特性
+- `src/ekey_fetch.rs` 的 `fetch_ekey`：按候选前缀依次请求，用**解密前 4 字节的音频 magic**（fLaC/OggS/ID3/RIFF/MPEG sync）验证通过才采纳；全部不通过时降级返回首个 ekey（保持原版行为）
 
-| | |
-|:---|:---|
-| 🔑 **自动获取 ekey** | 从本机 QQ 音乐客户端读取凭据，自动调用 API 获取解密密钥（**macOS / Windows 均支持**） |
-| 📂 **批量解密** | 传入目录即可批量处理所有支持的加密文件 |
-| 🔍 **文件信息** | 检测文件格式、尾部类型、元数据，无需解密 |
-| 🖥️ **Tauri 桌面应用** | 原生 WebView 现代界面，核心逻辑由 Rust 命令层驱动 |
+### 4. 解密输出校验（原版会静默写出乱码文件）
 
-## 支持的格式
+- `src/lib.rs`：`decrypt_file` 写盘前校验输出是否为合法音频；ekey 与密文不匹配时（典型场景：QQ 音乐服务端媒体轮换，旧媒体的 ekey 已从 API 消失）返回带根因说明的错误，而不是写出乱码
+- 新增公开函数 `looks_like_audio` / `hex_head`
 
-| 格式 | 扩展名 | 输出 | 需要密钥 |
-|------|--------|------|----------|
-| QMC1 | `.qmc0`, `.qmc3` | `.mp3` | 否（固定密码） |
-| QMC1 | `.qmc2`, `.qmcogg` | `.ogg` | 否（固定密码） |
-| QMC1 | `.qmcflac` | `.flac` | 否（固定密码） |
-| QMC2 | `.mgg`, `.mgg0`, `.mgg1`, `.mggl` | `.ogg` | 是（ekey） |
-| QMC2 | `.mflac`, `.mflac0`, `.mflach` | `.flac` | 是（ekey） |
+### 5. 新增命令行示例
 
-## 🚀 运行桌面应用
+- `examples/decrypt.rs`：`decrypt <input> <output> <ekey|--auto>`
 
-**前置要求：** 仅需 [Rust](https://rustup.rs/) 工具链；前端为纯静态页面，**无需 Node.js**。
+### 6. 诊断开关
 
-```bash
-# 安装 Tauri CLI（二选一）
-cargo install tauri-cli --locked
-# 或使用 npm：npm i -D @tauri-apps/cli
+- 环境变量 `QMC_DEBUG_API=1` 时打印 GetEVkey 原始响应，便于排查 ekey 问题
 
-# 开发模式（加载 frontend/ 下的静态页面）
-cargo tauri dev
+## 测试范围
 
-# 打包发布（macOS .app / Windows 安装包）
-cargo tauri build
-```
+- **仅测试了 QQ 音乐加密文件**（QMC2 的 mflac / mflac0 / mflac1 / mgg2，含 STag 与 musicex 尾部）；未测试其他平台格式（如 NCM、KGM），也未覆盖 QMC1 各扩展名的批量实测
+- **仅在 macOS 27.2（Apple Silicon）上测试**；Windows 端未测试
+- `cargo test` 21 项通过；批量解密实测 134/134 成功（130 flac + 4 ogg，全部输出 magic 校验有效）
 
-> 图标由 `scripts/generate-icons.py` 生成，可修改脚本后重新运行以自定义图标。
+## 同步状态
 
-## 📁 项目结构
-
-```
-qmc-decoder/
-├── src/                  — 核心解密库 qmc_decoder
-│   ├── lib.rs            — 库导出（解密逻辑、格式检测、文件处理）
-│   ├── qmc1.rs           — QMC1 XOR 密码实现
-│   ├── qmc2.rs           — QMC2 Map/RC4 密码实现 + ekey 解析
-│   └── ekey_fetch.rs     — QQ 音乐 API ekey 自动获取
-├── src-tauri/            — Tauri 桌面应用
-│   ├── tauri.conf.json   — 窗口 / 打包 / 图标配置
-│   ├── capabilities/     — 前端能力（core:default + opener）
-│   ├── icons/            — 应用图标（由 scripts/generate-icons.py 生成）
-│   └── src/
-│       ├── lib.rs        — 注册命令、挂载拖放事件
-│       ├── commands.rs   — 解密 / 信息 / 抓取 ekey / 文件选择
-│       └── main.rs       — 窗口入口
-├── frontend/             — Web 界面（纯静态 HTML/CSS/JS，无构建步骤）
-│   ├── index.html
-│   ├── styles.css
-│   └── main.js           — 通过全局 __TAURI__ 调用 Rust 命令
-├── TECHNICAL_DETAILS.md  — 解密原理与技术细节
-├── MGG_DECRYPTION_FLOW.md— 端到端解密流程文档
-└── scripts/
-    └── generate-icons.py — 生成应用图标（stdlib Python）
-```
-
-## 🧪 测试
-
-```bash
-cargo test
-```
-
-## 📚 文档
-
-- [解密原理与技术细节](TECHNICAL_DETAILS.md) — QMC 加密方案、算法实现、ekey 获取方式与核心 API
-- [MGG 解密流程](MGG_DECRYPTION_FLOW.md) — 端到端解密流程说明
-
-## 📄 许可证
-
-本项目基于 [GNU General Public License v3.0](LICENSE) 许可证开源。
+- 改动分支 `feat/stag-footer`，已向上游提交 PR：[ownlight6/qmc-decoder#6](https://github.com/ownlight6/qmc-decoder/pull/6)
